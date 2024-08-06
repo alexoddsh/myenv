@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, Response
 import yfinance as yf
 import math
 
@@ -58,15 +58,16 @@ def adjust_for_meeting_day(current_rate, rate_change, meeting_day, days_in_month
 
 @app.route('/calculate', methods=['GET'])
 def calculate():
+    output = ""
     implied_rates = {}
     effr_end = {}
     effr_start = {}
+
+    # Dictionary mapping months to their futures contract symbols based on the provided ticker symbols
     ticker_symbols = {
         8: 'ZQQ24.CBT', 9: 'ZQU24.CBT', 10: 'ZQV24.CBT',
         11: 'ZQX24.CBT', 12: 'ZQZ24.CBT'
     }
-
-    output = []
 
     # Fetch contract prices and implied rates for all months
     for month in ticker_symbols.keys():
@@ -74,18 +75,9 @@ def calculate():
         contract_price = fetch_futures_contract_price(ticker_symbol)
         if contract_price is not None:
             implied_rates[month] = calculate_implied_rate(contract_price)
-            output.append({
-                "Month": month,
-                "Ticker": ticker_symbol,
-                "Contract Price": contract_price,
-                "Implied Rate": implied_rates[month]
-            })
+            output += f"Month: {month}, Ticker: {ticker_symbol}, Contract Price: {contract_price}, Implied Rate: {implied_rates[month]:.3f}%\n"
         else:
-            output.append({
-                "Month": month,
-                "Ticker": ticker_symbol,
-                "Error": "Missing data"
-            })
+            output += f"Skipping month {month} due to missing data\n"
 
     # Calculate EFFR(End) for non-meeting months
     for i, month in enumerate(NON_MEETING_MONTHS):
@@ -99,11 +91,7 @@ def calculate():
             next_month = NON_MEETING_MONTHS[i + 1]
             effr_start[next_month] = effr_end[month]
         effr_start_str = f"{effr_start.get(month, 'N/A'):.3f}" if month in effr_start else 'N/A'
-        output.append({
-            "Non-Meeting Month": month,
-            "EFFR Start": effr_start_str,
-            "EFFR End": effr_end[month]
-        })
+        output += f"Non-Meeting Month: {month}, EFFR Start: {effr_start_str}, EFFR End: {effr_end[month]:.3f}\n"
 
     # Adjust for FOMC meeting months
     for month, meeting_day in FOMC_MEETING_DATES.items():
@@ -124,16 +112,16 @@ def calculate():
         n_days_before_meeting = meeting_day - 1
         n_days_after_meeting = days_in_month - n_days_before_meeting
 
+        output += f"\nCalculating EFFR(End) for Month: {month}\n"
+        output += f"  Implied Rate: {implied_rate:.3f}\n"
+        output += f"  EFFR(Start) for Month {month}: {effr_start[month]:.3f}\n"
+        output += f"  Days before meeting: {n_days_before_meeting}\n"
+        output += f"  Days after meeting: {n_days_after_meeting}\n"
+
+        # Correctly calculate EFFR end using the formula
         effr_end[month] = (implied_rate - (n_days_before_meeting / (n_days_before_meeting + n_days_after_meeting)) * effr_start[month]) / (n_days_after_meeting / (n_days_before_meeting + n_days_after_meeting))
 
-        output.append({
-            "Meeting Month": month,
-            "Implied Rate": implied_rate,
-            "EFFR Start": effr_start[month],
-            "EFFR End": effr_end[month],
-            "Days before meeting": n_days_before_meeting,
-            "Days after meeting": n_days_after_meeting
-        })
+        output += f"  EFFR(End) for Month {month}: {effr_end[month]:.3f}\n"
 
     # Calculate probabilities for FOMC meeting months
     for month in FOMC_MEETING_DATES.keys():
@@ -143,26 +131,20 @@ def calculate():
         end_rate = effr_end[month]
         whole_changes, prob_whole_change, prob_next_change = calculate_probabilities(start_rate, end_rate)
 
-        if end_rate < start_rate:
-            output.append({
-                "Probability Month": month,
-                "Start Rate": start_rate,
-                "End Rate": end_rate,
-                "Whole Cuts": whole_changes,
-                "Probability of whole cuts": prob_whole_change,
-                "Probability of next cuts": prob_next_change
-            })
-        else:
-            output.append({
-                "Probability Month": month,
-                "Start Rate": start_rate,
-                "End Rate": end_rate,
-                "Whole Hikes": whole_changes,
-                "Probability of whole hikes": prob_next_change,
-                "Probability of next hikes": prob_whole_change
-            })
+        output += f"\nCalculating Probabilities for Month: {month}\n"
+        output += f"  Start Rate: {start_rate:.3f}%\n"
+        output += f"  End Rate: {end_rate:.3f}%\n"
 
-    return jsonify(output)
+        if end_rate < start_rate:
+            output += f"  Whole Cuts: {whole_changes}\n"
+            output += f"  Probability of {whole_changes * 25} bps cut: {prob_whole_change * 100:.2f}%\n"
+            output += f"  Probability of {whole_changes * 25 + 25} bps cut: {prob_next_change * 100:.2f}%\n"
+        else:
+            output += f"  Whole Hikes: {whole_changes}\n"
+            output += f"  Probability of {whole_changes * 25} bps hike: {prob_next_change * 100:.2f}%\n"
+            output += f"  Probability of {whole_changes * 25 + 25} bps hike: {prob_whole_change * 100:.2f}%\n"
+
+    return Response(output, mimetype='text/plain')
 
 if __name__ == '__main__':
     app.run(debug=True)
